@@ -20,26 +20,16 @@ pipeline {
         stage('Static Analysis') {
             steps {
                 script {
-                    // Run installations sequentially to avoid apt lock issues
                     sh '''
-                        # Update apt cache once
                         sudo apt-get update || true
-                        
-                        # Install all tools at once to avoid lock conflicts
-                        sudo apt-get install -y cppcheck clang-tidy || true
-                        
-                        # Install Python tools
-                        pip install --user flawfinder gcovr || true
-                        
-                        # Add local bin to PATH
+                        sudo apt-get install -y cppcheck clang-tidy doxygen graphviz valgrind || true
+                        pip install --user flawfinder gcovr cpplint || true
                         export PATH="$HOME/.local/bin:$PATH"
                     '''
                     
-                    // Now run analyses in parallel
                     parallel(
                         "Cppcheck": {
                             sh '''
-                                # Run cppcheck with all checks enabled
                                 cppcheck --enable=all \
                                          --inconclusive \
                                          --xml \
@@ -47,7 +37,6 @@ pipeline {
                                          --suppress=missingIncludeSystem \
                                          src/ 2> cppcheck-report.xml || true
                                 
-                                # Convert XML to text report
                                 cppcheck --enable=all \
                                          --inconclusive \
                                          --suppress=missingIncludeSystem \
@@ -57,26 +46,164 @@ pipeline {
                         },
                         "Clang-Tidy": {
                             sh '''
-                                # Run clang-tidy on all C++ files
                                 find src/ -name '*.cpp' -exec clang-tidy {} -- -std=c++11 \\; > clang-tidy-report.txt 2>&1 || true
                             '''
                             archiveArtifacts artifacts: 'clang-tidy-report.txt', allowEmptyArchive: true
                         },
                         "Flawfinder": {
                             sh '''
-                                # Add local bin to PATH
                                 export PATH="$HOME/.local/bin:$PATH"
-                                
-                                # Run flawfinder security scanner
                                 flawfinder --html --minlevel=0 src/ > flawfinder-report.html || true
                                 flawfinder --minlevel=0 src/ > flawfinder-report.txt || true
                                 flawfinder --sarif src/ > flawfinder-report.sarif || true
                             '''
-                            // Archive HTML report instead of publishing
                             archiveArtifacts artifacts: 'flawfinder-report.html,flawfinder-report.txt,flawfinder-report.sarif', allowEmptyArchive: true
+                        },
+                        "CPPLint": {
+                            sh '''
+                                export PATH="$HOME/.local/bin:$PATH"
+                                find src/ -name '*.cpp' -o -name '*.h' | xargs cpplint --output=junit > cpplint-report.xml 2>&1 || true
+                                find src/ -name '*.cpp' -o -name '*.h' | xargs cpplint > cpplint-report.txt 2>&1 || true
+                            '''
+                            archiveArtifacts artifacts: 'cpplint-report.txt,cpplint-report.xml', allowEmptyArchive: true
                         }
                     )
                 }
+            }
+        }
+        
+        stage('Memory Leak Detection') {
+            steps {
+                sh '''
+                    export JENKINS_HOME=/tmp
+                    valgrind --leak-check=full \
+                             --show-leak-kinds=all \
+                             --track-origins=yes \
+                             --verbose \
+                             --log-file=valgrind-report.txt \
+                             ./build/test_game || true
+                    
+                    echo "=== Valgrind Memory Leak Analysis ===" > valgrind-summary.txt
+                    grep -E "ERROR SUMMARY|definitely lost|indirectly lost|possibly lost" valgrind-report.txt >> valgrind-summary.txt || true
+                '''
+                archiveArtifacts artifacts: 'valgrind-report.txt,valgrind-summary.txt', allowEmptyArchive: true
+            }
+        }
+        
+        stage('Duplicate Code Detection') {
+            steps {
+                sh '''
+                    if [ ! -f pmd-bin/bin/pmd ]; then
+                        wget -q https://github.com/pmd/pmd/releases/download/pmd_releases%2F7.9.0/pmd-dist-7.9.0-bin.zip || true
+                        unzip -q pmd-dist-7.9.0-bin.zip || true
+                        mv pmd-bin-7.9.0 pmd-bin || true
+                    fi
+                    
+                    ./pmd-bin/bin/pmd cpd --minimum-tokens 50 \
+                                          --language cpp \
+                                          --dir src/ \
+                                          --format text > cpd-report.txt || true
+                    
+                    ./pmd-bin/bin/pmd cpd --minimum-tokens 50 \
+                                          --language cpp \
+                                          --dir src/ \
+                                          --format xml > cpd-report.xml || true
+                    
+                    echo "=== Duplicate Code Detection Summary ===" > cpd-summary.txt
+                    grep -c "Found" cpd-report.txt >> cpd-summary.txt || echo "0 duplicates found" >> cpd-summary.txt
+                '''
+                archiveArtifacts artifacts: 'cpd-report.txt,cpd-report.xml,cpd-summary.txt', allowEmptyArchive: true
+            }
+        }
+        
+        stage('Documentation Generation') {
+            steps {
+                sh '''
+                    if [ ! -f Doxyfile ]; then
+                        doxygen -g Doxyfile
+                        sed -i 's/PROJECT_NAME           = "My Project"/PROJECT_NAME           = "Casino Game"/' Doxyfile
+                        sed -i 's/OUTPUT_DIRECTORY       =/OUTPUT_DIRECTORY       = docs/' Doxyfile
+                        sed -i 's/INPUT                  =/INPUT                  = src/' Doxyfile
+                        sed -i 's/RECURSIVE              = NO/RECURSIVE              = YES/' Doxyfile
+                        sed -i 's/GENERATE_HTML          = YES/GENERATE_HTML          = YES/' Doxyfile
+                        sed -i 's/GENERATE_LATEX         = YES/GENERATE_LATEX         = NO/' Doxyfile
+                        sed -i 's/EXTRACT_ALL            = NO/EXTRACT_ALL            = YES/' Doxyfile
+                        sed -i 's/HAVE_DOT               = NO/HAVE_DOT               = YES/' Doxyfile
+                        sed -i 's/UML_LOOK               = NO/UML_LOOK               = YES/' Doxyfile
+                        sed -i 's/CALL_GRAPH             = NO/CALL_GRAPH             = YES/' Doxyfile
+                        sed -i 's/CALLER_GRAPH           = NO/CALLER_GRAPH           = YES/' Doxyfile
+                    fi
+                    
+                    doxygen Doxyfile || true
+                    
+                    echo "=== Documentation Generation Report ===" > doxygen-summary.txt
+                    echo "Generated on: $(date)" >> doxygen-summary.txt
+                    echo "Files documented: $(find src/ -name '*.cpp' -o -name '*.h' | wc -l)" >> doxygen-summary.txt
+                    echo "HTML Documentation: docs/html/index.html" >> doxygen-summary.txt
+                '''
+                archiveArtifacts artifacts: 'docs/**/*,Doxyfile,doxygen-summary.txt', allowEmptyArchive: true
+            }
+        }
+        
+        stage('Complexity Analysis') {
+            steps {
+                sh '''
+                    pip install --user lizard || true
+                    export PATH="$HOME/.local/bin:$PATH"
+                    
+                    lizard src/ -o lizard-report.html || true
+                    lizard src/ > lizard-report.txt || true
+                    
+                    echo "=== Cyclomatic Complexity Analysis ===" > complexity-summary.txt
+                    echo "Functions with complexity > 15:" >> complexity-summary.txt
+                    lizard src/ | grep -E "^[[:space:]]*[0-9]+" | awk '$1 > 15 {print}' >> complexity-summary.txt || true
+                '''
+                archiveArtifacts artifacts: 'lizard-report.html,lizard-report.txt,complexity-summary.txt', allowEmptyArchive: true
+            }
+        }
+        
+        stage('Dependency Analysis') {
+            steps {
+                sh '''
+                    echo "=== Include Dependency Analysis ===" > dependency-report.txt
+                    echo "Generated on: $(date)" >> dependency-report.txt
+                    echo "" >> dependency-report.txt
+                    
+                    for file in src/*.cpp; do
+                        echo "File: $file" >> dependency-report.txt
+                        echo "Includes:" >> dependency-report.txt
+                        grep -E "^#include" "$file" | sed 's/^/  /' >> dependency-report.txt || true
+                        echo "" >> dependency-report.txt
+                    done
+                    
+                    echo "=== External Library Dependencies ===" >> dependency-report.txt
+                    grep -rh "^#include <" src/ | sort -u >> dependency-report.txt || true
+                '''
+                archiveArtifacts artifacts: 'dependency-report.txt', allowEmptyArchive: true
+            }
+        }
+        
+        stage('Build Metrics') {
+            steps {
+                sh '''
+                    echo "=== Build Metrics Report ===" > build-metrics.txt
+                    echo "Build Number: ${BUILD_NUMBER}" >> build-metrics.txt
+                    echo "Build Date: $(date)" >> build-metrics.txt
+                    echo "" >> build-metrics.txt
+                    
+                    echo "Lines of Code:" >> build-metrics.txt
+                    find src/ -name '*.cpp' -o -name '*.h' | xargs wc -l | tail -1 >> build-metrics.txt
+                    
+                    echo "" >> build-metrics.txt
+                    echo "File Counts:" >> build-metrics.txt
+                    echo "C++ Source Files: $(find src/ -name '*.cpp' | wc -l)" >> build-metrics.txt
+                    echo "Header Files: $(find src/ -name '*.h' | wc -l)" >> build-metrics.txt
+                    
+                    echo "" >> build-metrics.txt
+                    echo "Binary Size:" >> build-metrics.txt
+                    ls -lh build/casino_game build/test_game | awk '{print $9 ": " $5}' >> build-metrics.txt || true
+                '''
+                archiveArtifacts artifacts: 'build-metrics.txt', allowEmptyArchive: true
             }
         }
         
@@ -93,23 +220,21 @@ pipeline {
         stage('Code Coverage') {
             steps {
                 sh '''
-                    # Rebuild with coverage flags
                     cmake -B build-coverage -S . -DCMAKE_CXX_FLAGS="--coverage"
                     cmake --build build-coverage
                     
-                    # Run tests with coverage
                     export JENKINS_HOME=/tmp
                     ./build-coverage/test_game || true
                     
-                    # Add local bin to PATH
                     export PATH="$HOME/.local/bin:$PATH"
                     
-                    # Generate coverage report
                     gcovr -r . --html --html-details -o coverage-report.html || true
                     gcovr -r . --txt -o coverage-report.txt || true
+                    
+                    echo "=== Code Coverage Summary ===" > coverage-summary.txt
+                    gcovr -r . | tail -5 >> coverage-summary.txt || true
                 '''
-                // Archive HTML report instead of publishing
-                archiveArtifacts artifacts: 'coverage-report.html,coverage-report.txt', allowEmptyArchive: true
+                archiveArtifacts artifacts: 'coverage-report.html,coverage-report.txt,coverage-summary.txt', allowEmptyArchive: true
             }
         }
         
@@ -117,40 +242,21 @@ pipeline {
             steps {
                 script {
                     sh '''
-                        # Create Dockerfile if it doesn't exist
-                        cat > Dockerfile << 'EOF'
-FROM ubuntu:22.04
-
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
-    libstdc++6 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create app directory
-WORKDIR /app
-
-# Copy built executables
-COPY build/casino_game /app/
-COPY build/test_game /app/
-
-# Set executable permissions
-RUN chmod +x /app/casino_game /app/test_game
-
-# Set environment variable for non-interactive mode
-ENV JENKINS_HOME=/tmp
-
-# Add health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD test -f /app/casino_game || exit 1
-
-# Default command
-CMD ["/app/casino_game"]
-EOF
+                        # Verify Dockerfile exists in repo
+                        if [ ! -f Dockerfile ]; then
+                            echo "ERROR: Dockerfile not found in repository!"
+                            exit 1
+                        fi
                         
-                        # Build Docker image
+                        # Build Docker image using Dockerfile from repo
                         docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} .
                         docker tag ${DOCKER_IMAGE}:${DOCKER_TAG} ${DOCKER_IMAGE}:latest
+                        
+                        # Display Dockerfile content for verification
+                        echo "=== Using Dockerfile from repository ===" > dockerfile-info.txt
+                        cat Dockerfile >> dockerfile-info.txt
                     '''
+                    archiveArtifacts artifacts: 'dockerfile-info.txt', allowEmptyArchive: true
                 }
             }
         }
@@ -158,52 +264,32 @@ EOF
         stage('Docker Image Vulnerability Scan') {
             steps {
                 script {
-                    // Install tools sequentially first
                     sh '''
-                        # Install Trivy if not available
                         if ! which trivy; then
                             wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add - || true
                             echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
                             sudo apt-get update && sudo apt-get install -y trivy || true
                         fi
                         
-                        # Install Grype if not available
                         if ! which grype; then
                             curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sudo sh -s -- -b /usr/local/bin || true
                         fi
                     '''
                     
-                    // Run scans in parallel
                     parallel(
                         "Trivy": {
                             sh '''
-                                # Update Trivy database
                                 trivy image --download-db-only || true
-                                
-                                # Scan Docker image - JSON format
                                 trivy image --format json --output trivy-report.json ${DOCKER_IMAGE}:${DOCKER_TAG} || true
-                                
-                                # Scan Docker image - Table format (text)
                                 trivy image --format table --output trivy-report.txt ${DOCKER_IMAGE}:${DOCKER_TAG} || true
-                                
-                                # Scan with severity threshold
                                 trivy image --severity HIGH,CRITICAL --format table --output trivy-critical-report.txt ${DOCKER_IMAGE}:${DOCKER_TAG} || true
-                                
-                                # Generate HTML report
-                                trivy image --format template --template "@contrib/html.tpl" --output trivy-report.html ${DOCKER_IMAGE}:${DOCKER_TAG} || true
                             '''
-                            // Archive HTML report instead of publishing
-                            archiveArtifacts artifacts: 'trivy-report.html,trivy-report.txt,trivy-critical-report.txt,trivy-report.json', allowEmptyArchive: true
+                            archiveArtifacts artifacts: 'trivy-report.txt,trivy-critical-report.txt,trivy-report.json', allowEmptyArchive: true
                         },
                         "Grype": {
                             sh '''
-                                # Scan with Grype - JSON format
                                 grype ${DOCKER_IMAGE}:${DOCKER_TAG} -o json > grype-report.json || true
-                                
-                                # Scan with Grype - Table format (text)
                                 grype ${DOCKER_IMAGE}:${DOCKER_TAG} -o table > grype-report.txt || true
-                                
-                                # Scan with Grype - SARIF format
                                 grype ${DOCKER_IMAGE}:${DOCKER_TAG} -o sarif > grype-report.sarif || true
                             '''
                             archiveArtifacts artifacts: 'grype-report.txt,grype-report.json,grype-report.sarif', allowEmptyArchive: true
@@ -217,17 +303,14 @@ EOF
             steps {
                 script {
                     sh '''
-                        # Stop and remove existing container if running
                         docker stop ${CONTAINER_NAME} 2>/dev/null || true
                         docker rm ${CONTAINER_NAME} 2>/dev/null || true
                         
-                        # Run the container in detached mode
                         docker run -d \
                             --name ${CONTAINER_NAME} \
                             --restart unless-stopped \
                             ${DOCKER_IMAGE}:${DOCKER_TAG}
                         
-                        # Wait for container to start
                         sleep 5
                     '''
                 }
@@ -243,12 +326,10 @@ EOF
                         echo "Timestamp: $(date)" >> container-health-report.txt
                         echo "" >> container-health-report.txt
                         
-                        # Check container status
                         echo "Container Status:" >> container-health-report.txt
                         docker ps -a --filter "name=${CONTAINER_NAME}" --format "table {{.Names}}\t{{.Status}}\t{{.State}}" >> container-health-report.txt
                         echo "" >> container-health-report.txt
                         
-                        # Check if container is running
                         CONTAINER_STATUS=$(docker inspect -f '{{.State.Status}}' ${CONTAINER_NAME} 2>/dev/null || echo "unknown")
                         echo "Container State: $CONTAINER_STATUS" >> container-health-report.txt
                         
@@ -256,27 +337,23 @@ EOF
                             echo "WARNING: Container is not running!" >> container-health-report.txt
                         fi
                         
-                        # Check health status
                         HEALTH_STATUS=$(docker inspect -f '{{.State.Health.Status}}' ${CONTAINER_NAME} 2>/dev/null || echo "No health check defined")
                         echo "Health Status: $HEALTH_STATUS" >> container-health-report.txt
                         echo "" >> container-health-report.txt
                         
-                        # Get container logs
                         echo "Container Logs (last 50 lines):" >> container-health-report.txt
                         docker logs --tail 50 ${CONTAINER_NAME} >> container-health-report.txt 2>&1 || true
                         echo "" >> container-health-report.txt
                         
-                        # Resource usage
                         echo "Resource Usage:" >> container-health-report.txt
                         docker stats --no-stream ${CONTAINER_NAME} >> container-health-report.txt 2>&1 || true
                         echo "" >> container-health-report.txt
                         
-                        # Network information
                         echo "Network Information:" >> container-health-report.txt
                         docker inspect -f '{{range .NetworkSettings.Networks}}IP: {{.IPAddress}}{{end}}' ${CONTAINER_NAME} >> container-health-report.txt 2>&1 || true
                         
                         echo "" >> container-health-report.txt
-                        echo "=== Health Check Completed ===\" >> container-health-report.txt
+                        echo "=== Health Check Completed ===" >> container-health-report.txt
                     '''
                     archiveArtifacts artifacts: 'container-health-report.txt'
                 }
@@ -286,14 +363,10 @@ EOF
         stage('Deliver') {
             steps {
                 sh '''
-                    # Archive the built executable
                     tar -czf casino_game.tar.gz build/casino_game
-                    
-                    # Save Docker image as tar
                     docker save ${DOCKER_IMAGE}:${DOCKER_TAG} -o ${DOCKER_IMAGE}-${DOCKER_TAG}.tar
                     gzip ${DOCKER_IMAGE}-${DOCKER_TAG}.tar
                     
-                    # Create delivery summary report
                     cat > delivery-summary.txt << EOF
 === Delivery Summary Report ===
 Build Number: ${BUILD_NUMBER}
@@ -313,7 +386,16 @@ Code Quality Reports:
 - Cppcheck: cppcheck-report.txt
 - Clang-Tidy: clang-tidy-report.txt
 - Flawfinder: flawfinder-report.txt
+- CPPLint: cpplint-report.txt
 - Coverage: coverage-report.txt
+
+Additional Analysis:
+- Memory Leaks: valgrind-report.txt
+- Duplicate Code: cpd-report.txt
+- Documentation: docs/html/index.html
+- Complexity: lizard-report.txt
+- Dependencies: dependency-report.txt
+- Build Metrics: build-metrics.txt
 
 Container Status: Running
 Health Check: container-health-report.txt
@@ -328,12 +410,9 @@ EOF
     
     post {
         always {
-            // Archive all analysis reports as text files
-            archiveArtifacts artifacts: '*-report.txt,*-report.json,*-report.sarif,*-report.xml,*-report.html', allowEmptyArchive: true
+            archiveArtifacts artifacts: '*-report.txt,*-report.json,*-report.sarif,*-report.xml,*-report.html,*-summary.txt', allowEmptyArchive: true
             
-            // Clean up old containers (optional)
             sh '''
-                # Keep only last 3 containers
                 docker ps -a --filter "name=${DOCKER_IMAGE}" --format "{{.Names}}" | tail -n +4 | xargs -r docker rm -f || true
             '''
         }
