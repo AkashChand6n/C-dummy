@@ -53,7 +53,6 @@ pipeline {
                                          --suppress=missingIncludeSystem \
                                          src/ 2> cppcheck-report.txt || true
                             '''
-                            // Use recordIssues instead of publishCppcheck if plugin not installed
                             archiveArtifacts artifacts: 'cppcheck-report.txt,cppcheck-report.xml', allowEmptyArchive: true
                         },
                         "Clang-Tidy": {
@@ -73,13 +72,8 @@ pipeline {
                                 flawfinder --minlevel=0 src/ > flawfinder-report.txt || true
                                 flawfinder --sarif src/ > flawfinder-report.sarif || true
                             '''
-                            publishHTML([
-                                reportDir: '.',
-                                reportFiles: 'flawfinder-report.html',
-                                reportName: 'Flawfinder Security Report',
-                                allowMissing: true
-                            ])
-                            archiveArtifacts artifacts: 'flawfinder-report.txt,flawfinder-report.sarif', allowEmptyArchive: true
+                            // Archive HTML report instead of publishing
+                            archiveArtifacts artifacts: 'flawfinder-report.html,flawfinder-report.txt,flawfinder-report.sarif', allowEmptyArchive: true
                         }
                     )
                 }
@@ -114,13 +108,8 @@ pipeline {
                     gcovr -r . --html --html-details -o coverage-report.html || true
                     gcovr -r . --txt -o coverage-report.txt || true
                 '''
-                publishHTML([
-                    reportDir: '.',
-                    reportFiles: 'coverage-report.html',
-                    reportName: 'Code Coverage Report',
-                    allowMissing: true
-                ])
-                archiveArtifacts artifacts: 'coverage-report.txt', allowEmptyArchive: true
+                // Archive HTML report instead of publishing
+                archiveArtifacts artifacts: 'coverage-report.html,coverage-report.txt', allowEmptyArchive: true
             }
         }
         
@@ -203,13 +192,8 @@ EOF
                                 # Generate HTML report
                                 trivy image --format template --template "@contrib/html.tpl" --output trivy-report.html ${DOCKER_IMAGE}:${DOCKER_TAG} || true
                             '''
-                            publishHTML([
-                                reportDir: '.',
-                                reportFiles: 'trivy-report.html',
-                                reportName: 'Trivy Vulnerability Report',
-                                allowMissing: true
-                            ])
-                            archiveArtifacts artifacts: 'trivy-report.txt,trivy-critical-report.txt,trivy-report.json', allowEmptyArchive: true
+                            // Archive HTML report instead of publishing
+                            archiveArtifacts artifacts: 'trivy-report.html,trivy-report.txt,trivy-critical-report.txt,trivy-report.json', allowEmptyArchive: true
                         },
                         "Grype": {
                             sh '''
@@ -292,7 +276,7 @@ EOF
                         docker inspect -f '{{range .NetworkSettings.Networks}}IP: {{.IPAddress}}{{end}}' ${CONTAINER_NAME} >> container-health-report.txt 2>&1 || true
                         
                         echo "" >> container-health-report.txt
-                        echo "=== Health Check Completed ===" >> container-health-report.txt
+                        echo "=== Health Check Completed ===\" >> container-health-report.txt
                     '''
                     archiveArtifacts artifacts: 'container-health-report.txt'
                 }
