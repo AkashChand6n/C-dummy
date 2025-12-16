@@ -1248,6 +1248,13 @@ jobs:
       DOCKER_TAG: ${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
+
+      #added Download build artifacts
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: build/
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Rebuild Docker Image for Scanning
