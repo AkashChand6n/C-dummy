@@ -1675,6 +1675,15 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
+      
+      # ADD THIS STEP - Copy build artifacts to build/ directory
+      - name: Prepare Build Directory
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          cp -r artifacts/build-artifacts/* build/ 2>/dev/null || true
+          ls -la build/
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Rebuild Docker Image for Export
